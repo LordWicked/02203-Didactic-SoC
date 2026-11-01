@@ -55,82 +55,250 @@ module pixel_acc #(
     //
     // ============================================================
 
-    typedef enum logic [1:0] {
-        IDLE    = 2'b00,
-        PROCESS = 2'b01,
-        DRAIN   = 2'b10
+    typedef enum logic [2:0] {
+        IDLE    = 3'd0,
+        LOAD_R0 = 3'd1,
+        LOAD_R1 = 3'd2,
+        LOAD_R2 = 3'd3,
+        WAIT_R2 = 3'd4,
+        CALC_POP = 3'd5,
+        END_ROW = 3'd6,
+        FINAL = 3'd7
     } state_t;
 
-    state_t            state;
-    logic [BUF_AW-1:0] rd_addr;   // current ibuf read address
-    logic [BUF_AW-1:0] wr_addr;   // current obuf write address (= rd_addr delayed 1 cycle)
-    logic              pipe_valid; // 0 on first PROCESS cycle (rd_data not yet valid)
-    logic [31:0] pixel_out;
-    
+    state_t state, next_state;
 
-    // ---- FSM ----
+    // COUNTERS:
+    logic [8:0] r, next_r; //row counter: 1 to 286
+    logic [6:0] w, next_w; //word counter: 352(imgwidth)/4(addresswidth): 0 to 87
+
+    // DATAPATH REGISTERS: 3x4 current pixel-window + 3x2 overlap + 2 output
+    // holding registers.
+    logic [7:0] curr [3][4];
+    logic [7:0] next_curr [3][4];
+    logic [7:0] prev_c [3], prev_d [3];
+    logic [7:0] next_prev_c [3], next_prev_d [3];
+    logic [7:0] hold_b, hold_c, hold_a;
+    logic [7:0] next_hold_b, next_hold_c, next_hold_a;
+
+    // SOBEL FUNCTION (COMBINATIONAL)
+    function automatic [7:0] sobel_calc(
+      input logic [7:0] p00, p01, p02,
+      input logic [7:0] p10, p11, p12,
+      input logic [7:0] p20, p21, p22
+    );
+
+      int signed gx, gy, abs_gx, abs_gy, sum;
+      gx = (int'(p02) + 2*int'(p12) + int'(p22)) - (int'(p00) + 2*int'(p10) + int'(p20));
+      gy = (int'(p20) + 2*int'(p21) + int'(p22)) - (int'(p00) + 2*int'(p01) + int'(p02));
+      abs_gx = (gx < 0) ? -gx : gx;
+      abs_gy = (gy < 0) ? -gy : gy;
+      sum = abs_gx + abs_gy;
+      return (sum > 255) ? 8'd255 : sum[7:0];
+    endfunction
+
+    // SEQUENTIAL LOGIC.
     always_ff @(posedge clk or negedge rst_n) begin
-        if (~rst_n) begin
-            state      <= IDLE;
-            rd_addr    <= '0;
-            wr_addr    <= '0;
-            pipe_valid <= 1'b0;
-            ibuf_rd_en <= 1'b0;
-            obuf_wr_en <= 1'b0;
-            finish     <= 1'b0;
-        end else begin
-            ibuf_rd_en <= 1'b0;
-            obuf_wr_en <= 1'b0;
-            finish     <= 1'b0;
-
-            case (state)
-                IDLE: begin
-                    pipe_valid <= 1'b0;
-                    if (start) begin
-                        rd_addr      <= '0;
-                        ibuf_rd_en   <= 1'b1;
-                        ibuf_rd_addr <= '0;
-                        state        <= PROCESS;
-                    end
-                end
-
-                PROCESS: begin
-                    pipe_valid <= 1'b1;
-                    wr_addr    <= rd_addr;  // write address tracks read address with 1 cycle latency
-
-                    // Write result from previous read (suppressed on first cycle)
-                    if (pipe_valid) begin
-                        obuf_wr_en   <= 1'b1;
-                        obuf_wr_addr <= wr_addr;
-                        obuf_wr_data <= pixel_out;
-                    end
-
-                    if (rd_addr == BUF_AW'(BUF_DEPTH - 1)) begin
-                        // Last read issued - drain the pipeline
-                        ibuf_rd_en <= 1'b0;
-                        state      <= DRAIN;
-                    end else begin
-                        rd_addr      <= rd_addr + 1'b1;
-                        ibuf_rd_en   <= 1'b1;
-                        ibuf_rd_addr <= rd_addr + 1'b1;
-                    end
-                end
-
-                DRAIN: begin
-                    // Write the last word (pipeline had one word in flight)
-                    obuf_wr_en   <= 1'b1;
-                    obuf_wr_addr <= wr_addr;
-                    obuf_wr_data <= pixel_out;
-                    finish       <= 1'b1;
-                    state        <= IDLE;
-                end
-
-                default: state <= IDLE;
-            endcase
+      if (~rst_n) begin
+        state <= IDLE;
+        r <= 9'd1;
+        w <= 7'd0;
+        hold_b <= 8'd0;
+        hold_c <= 8'd0;
+        hold_a <= 8'd0;
+        for (int i = 0; i < 3; i++) begin
+          prev_c[i] <= 8'd0;
+          prev_d[i] <= 8'd0;
+          for (int j = 0; j < 4; j++) begin
+            curr[i][j] <= 8'd0;
+          end
         end
+      end else begin
+        state <= next_state;
+        r <= next_r;
+        w <= next_w;
+        hold_b <= next_hold_b;
+        hold_c <= next_hold_c;
+        hold_a <= next_hold_a;
+        for (int i = 0; i < 3; i++) begin
+          prev_c[i] <= next_prev_c[i];
+          prev_d[i] <= next_prev_d[i];
+          for (int j = 0; j < 4; j++) begin
+            curr[i][j] <= next_curr[i][j];
+          end
+        end
+      end
     end
-    
+
+    // COMBINATIONAL LOGIC (ASMD).
     always_comb begin
-        pixel_out = ~ibuf_rd_data;  // TASK 0: invert all pixels
+      next_state = state;
+      next_r = r;
+      next_w = w;
+      next_hold_b = hold_b;
+      next_hold_c = hold_c;
+      next_hold_a = hold_a;
+      for (int i = 0; i < 3; i++) begin
+        next_prev_c[i] = prev_c[i];
+        next_prev_d[i] = prev_d[i];
+        for (int j = 0; j < 4; j++) begin
+          next_curr[i][j] = curr[i][j];
+        end
+      end
+
+      ibuf_rd_en = 1'b0;
+      ibuf_rd_addr = '0;
+      obuf_wr_en = 1'b0;
+      obuf_wr_addr = '0;
+      obuf_wr_data = '0;
+      finish = 1'b0;
+
+      // Sobel outputs computed combinationally from active 3x6 window:
+      // window d_prev: [prev_c, prev_d, curr_a]
+      // window a_curr: [prev_d, curr_a, curr_b]
+      // window b_curr: [curr_a, curr_b, curr_c]
+      // window c_curr: [curr_b, curr_c, curr_d]
+      //
+      // Row i has cols: prev_c[i], prev_d[i], curr_a[i], curr_b[i], curr_c[i],
+      // curr_d[i].
+      
+      case (state)
+        IDLE: begin
+          if (start == 1) begin
+            next_r = 9'd1;
+            next_w = 7'd0;
+            ibuf_rd_en = 1'b1;
+            ibuf_rd_addr = (r - 1) * IMG_WIDTH + w; // request R0.
+            next_state = LOAD_R0;
+          end
+        end
+        
+        LOAD_R0: begin
+          next_curr[0][0] = ibuf_rd_data[7:0]; // load R0.
+          next_curr[0][1] = ibuf_rd_data[15:8];
+          next_curr[0][2] = ibuf_rd_data[23:16];
+          next_curr[0][3] = ibuf_rd_data[31:24];
+
+          ibuf_rd_en = 1'b1;
+          ibuf_rd_addr = r * IMG_WIDTH + w; // request R1.
+          next_state = LOAD_R1;
+        end
+
+        LOAD_R1: begin
+          next_curr[1][0] = ibuf_rd_data[7:0]; // load R1.
+          next_curr[1][1] = ibuf_rd_data[15:8];
+          next_curr[1][2] = ibuf_rd_data[23:16];
+          next_curr[1][3] = ibuf_rd_data[31:24];
+
+          ibuf_rd_en = 1'b1;
+          ibuf_rd_addr = (r + 1) * IMG_WIDTH + w; // request R2.
+          next_state = LOAD_R2;
+        end
+
+        LOAD_R2: begin
+          next_curr[2][0] = ibuf_rd_data[7:0]; // load R2.
+          next_curr[2][1] = ibuf_rd_data[15:8];
+          next_curr[2][2] = ibuf_rd_data[23:16];
+          next_curr[2][3] = ibuf_rd_data[31:24];
+
+          next_state = WAIT_R2;
+        end
+
+        WAIT_R2: begin
+          // state to ensure all BRAM data is fully registered.
+          next_state = CALC_POP;
+        end
+
+        CALC_POP: begin
+          // calculate 4 sobel outputs.
+          // d_prev: col 1, 2, 3 -> prev_c[i], prev_d[i], curr[i][0]
+          // a_curr: col 2, 3, 4 -> prev_d[i], curr[i][0], curr[i][1]
+          // b_curr: col 3, 4, 5 -> curr[i][0], curr[i][1], curr[i][2]
+          // c_curr: col 4, 5, 6 -> curr[i][1], curr[i][2], curr[i][3]
+
+          automatic logic [7:0] sobel_d_prev = sobel_calc(
+            prev_c[0], prev_d[0], curr[0][0],
+            prev_c[1], prev_d[1], curr[1][0],
+            prev_c[2], prev_d[2], curr[2][0]
+          );
+
+          automatic logic [7:0] sobel_a_curr = sobel_calc(
+            prev_d[0], curr[0][0], curr[0][1],
+            prev_d[1], curr[1][0], curr[1][1],
+            prev_d[2], curr[2][0], curr[2][1]
+          );
+
+          automatic logic [7:0] sobel_b_curr = sobel_calc(
+            curr[0][0], curr[0][1], curr[0][2],
+            curr[1][0], curr[1][1], curr[1][2],
+            curr[2][0], curr[2][1], curr[2][2]
+          );
+
+          automatic logic [7:0] sobel_c_curr = sobel_calc(
+            curr[0][1], curr[0][2], curr[0][3],
+            curr[1][1], curr[1][2], curr[1][3],
+            curr[2][1], curr[2][2], curr[2][3]
+          );
+
+          // save b and c for next time.
+          next_hold_b = sobel_b_curr;
+          next_hold_c = sobel_c_curr;
+          next_hold_a = sobel_a_curr;
+
+          // shift current c and d into prev_c and prev_d.
+          for (int i = 0; i < 3; i++) begin
+            next_prev_c[i] = curr[i][2];
+            next_prev_d[i] = curr[i][3];
+          end
+
+          // handle output writing to obuf (skipped on w = 0 since only
+          // 2 pixels ready).
+          if (w > 0) begin
+            obuf_wr_en = 1'b1;
+            obuf_wr_addr = r * IMG_WIDTH + (w - 1);
+            obuf_wr_data = {sobel_d_prev, hold_c, hold_b, hold_a};
+          end
+
+          if (w == IMG_WIDTH - 1) begin
+            next_state = END_ROW;
+          end else begin
+            next_w = w + 1'b1;
+            ibuf_rd_en = 1'b1;
+            ibuf_rd_addr = (r - 1) * IMG_WIDTH + (w + 1);
+            next_state = LOAD_R0;
+          end
+        end
+
+        END_ROW: begin
+          // flush final 2 leftover pixels of the row.
+          obuf_wr_en = 1'b1;
+          obuf_wr_addr = r * IMG_WIDTH + (IMG_WIDTH - 1);
+          obuf_wr_data = {8'd0, hold_c, hold_b, hold_a};
+          next_w = 7'd0;
+
+          // clear overlap regs for the start of the next row.
+          for (int i = 0; i < 3; i++) begin
+            next_prev_c[i] = 8'd0;
+            next_prev_d[i] = 8'd0;
+          end
+
+          if (r == 9'd286) begin
+            next_state = FINAL;
+          end else begin
+            next_r = r + 1'b1;
+            ibuf_rd_en = 1'b1;
+            ibuf_rd_addr = r * IMG_WIDTH; // start of next row minus 1.
+            next_state = LOAD_R0;
+          end
+        end
+
+        FINAL: begin
+          finish = 1'b1;
+          next_state = IDLE;
+        end
+
+        default: next_state = IDLE;
+      endcase
     end
+
 endmodule
