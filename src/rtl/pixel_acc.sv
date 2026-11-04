@@ -201,11 +201,6 @@ module pixel_acc #(
           next_curr[2][2] = ibuf_rd_data[23:16];
           next_curr[2][3] = ibuf_rd_data[31:24];
 
-          next_state = WAIT_R2;
-        end
-
-        WAIT_R2: begin
-          // state to ensure all BRAM data is fully registered.
           next_state = CALC_POP;
         end
 
