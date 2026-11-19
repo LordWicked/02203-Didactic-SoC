@@ -242,21 +242,21 @@ module pixel_acc #(
 
           // shift current c and d into prev_c and prev_d.
           for (int i = 0; i < 3; i++) begin
-            next_prev_c[i] = curr[i][2];
-            next_prev_d[i] = curr[i][3];
+            next_prev_c[i] = curr[i][2]; // keep prev c for the next window so prev d can be calculated
+            next_prev_d[i] = curr[i][3]; // keep prev d so that it can be calculated in the next window.
           end
 
           // handle output writing to obuf (skipped on w = 0 since only
           // 2 pixels ready).
-          if (w > 0) begin
+          if (w > 0) begin // if we are in the next window, that means prev d is already done and hold a,b,c can be used to send 4 sobel pixels over obuf.
             obuf_wr_en = 1'b1;
-            obuf_wr_addr = r * IMG_WIDTH + (w - 1);
-            obuf_wr_data = {sobel_d_prev, hold_c, hold_b, hold_a};
+            obuf_wr_addr = r * IMG_WIDTH + (w - 1); // load next window.
+            obuf_wr_data = {sobel_d_prev, hold_c, hold_b, hold_a}; // while loading next window, send previous 4 calculated sobel pixels.
           end
 
-          if (w == IMG_WIDTH - 1) begin
+          if (w == IMG_WIDTH - 1) begin // if row ends, move to next row.
             next_state = END_ROW;
-          end else begin
+          end else begin // not the last word of the row? then load next word in same row until row ends.
             next_w = w + 1'b1;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr = (r - 1) * IMG_WIDTH + (w + 1);
@@ -268,18 +268,20 @@ module pixel_acc #(
           // flush final 2 leftover pixels of the row.
           obuf_wr_en = 1'b1;
           obuf_wr_addr = r * IMG_WIDTH + (IMG_WIDTH - 1);
-          obuf_wr_data = {8'd0, hold_c, hold_b, hold_a};
+          obuf_wr_data = {8'd0, hold_c, hold_b, hold_a}; // last d col in the last word of the previous row is not considered.
           next_w = 7'd0;
 
           // clear overlap regs for the start of the next row.
+          /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+          //BORDER DOES NOT CALCULATE LAST D OF LAST WORD IN PREVIOUS ROW.
           for (int i = 0; i < 3; i++) begin
-            next_prev_c[i] = 8'd0;
-            next_prev_d[i] = 8'd0;
+            next_prev_c[i] = 8'd0; // prev_c is not saved because we will not calculate prev_d from the last word of the previous row.
+            next_prev_d[i] = 8'd0; // we dont consider prev_d of the last word in the previous row.
           end
 
-          if (r == 9'd286) begin
-            next_state = FINAL;
-          end else begin
+          if (r == 9'd286) begin // check if we are at the last word in the last row.
+            next_state = FINAL; // if so then signal DONE.
+          end else begin // if not last row yet just continue to the next row.
             next_r = r + 1'b1;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr = r * IMG_WIDTH; // start of next row minus 1.
