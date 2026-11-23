@@ -233,37 +233,30 @@ module pixel_acc #(
           next_curr[0][2] = lbu_rd_data[23:16];
           next_curr[0][3] = lbu_rd_data[31:24];
 
-          lbm_rd_en = 1'b1;
-          lbm_rd_addr = w; // request R1.
+          
 
           next_curr[1][0] = lbm_rd_data[7:0]; // load R1.
           next_curr[1][1] = lbm_rd_data[15:8];
           next_curr[1][2] = lbm_rd_data[23:16];
           next_curr[1][3] = lbm_rd_data[31:24];
 
-          ibuf_rd_en = 1'b1;
-          ibuf_rd_addr = (r + 1) * IMG_WIDTH + w; // request R2.
-
+        
           next_curr[2][0] = ibuf_rd_data[7:0]; // load R2.
           next_curr[2][1] = ibuf_rd_data[15:8];
           next_curr[2][2] = ibuf_rd_data[23:16];
           next_curr[2][3] = ibuf_rd_data[31:24];
 
+          
+          
+
           next_state = CALC_POP;
+
+          
 
         end
 
         CALC_POP: begin
-          // optimisation: 
-          // store the middle row (a, b, c and d ) in the buffer for the up line, these data will be use for the next row (same column)
-          lbu_wr_en = 1'b1;
-          lbu_wr_addr = w;
-          lbu_wr_data = next_curr[1];
-
-          // store the lower row (a, b, c and d ) in the buffer for the middle line,
-          lbm_wr_en = 1'b1;
-          lbm_wr_addr = w;
-          lbm_wr_data = next_curr[2];
+          
 
 
           // calculate 4 sobel outputs.
@@ -296,6 +289,17 @@ module pixel_acc #(
             curr[2][1], curr[2][2], curr[2][3]
           );
 
+          // optimisation: 
+          // store the middle row (a, b, c and d ) in the buffer for the up line, these data will be use for the next row (same column)
+          lbu_wr_en = 1'b1;
+          lbu_wr_addr = w;
+          lbu_wr_data = lbm_rd_data;
+
+          // store the lower row (a, b, c and d ) in the buffer for the middle line,
+          lbm_wr_en = 1'b1;
+          lbm_wr_addr = w;
+          lbm_wr_data = ibuf_rd_data;
+
           // save b and c for next time.
           next_hold_b = sobel_b_curr;
           next_hold_c = sobel_c_curr;
@@ -321,6 +325,10 @@ module pixel_acc #(
             next_w = w + 1'b1;
             lbu_rd_en = 1'b1;
             lbu_rd_addr = w + 1;
+            lbm_rd_en = 1'b1;
+            lbm_rd_addr = w + 1;
+            ibuf_rd_en = 1'b1;
+            ibuf_rd_addr = (r + 1) * IMG_WIDTH + (w+1);
             next_state = LOAD_R0_R1_R2;
           end
         end
@@ -344,8 +352,12 @@ module pixel_acc #(
             next_state = FINAL; // if so then signal DONE.
           end else begin // if not last row yet just continue to the next row.
             next_r = r + 1'b1;
+            lbu_rd_en = 1'b1;
+            lbu_rd_addr = 0;
+            lbm_rd_en = 1'b1;
+            lbm_rd_addr = 0;
             ibuf_rd_en = 1'b1;
-            ibuf_rd_addr = 0; // start of next row minus 1.
+            ibuf_rd_addr =  (r + 2) * IMG_WIDTH; // start of next row minus 1.
             next_state = LOAD_R0_R1_R2;
           end
         end
