@@ -23,7 +23,7 @@
 //    IMG_WIDTH - frame width in words (= pixels per row / 4)
 // ============================================================
 module pixel_acc #(
-    parameter int BUF_AW    = 15,
+    parameter int BUF_AW    = 15,  // buffer adress width
     parameter int BUF_DEPTH = 25344,
     parameter int IMG_WIDTH = 88      // 352 pixels / 4 pixels-per-word
 )(
@@ -39,6 +39,8 @@ module pixel_acc #(
     output logic                  obuf_wr_en,
     output logic [BUF_AW-1:0]     obuf_wr_addr,
     output logic [31:0]           obuf_wr_data,
+
+
 
     // handshake
     input  logic                  start,
@@ -57,16 +59,50 @@ module pixel_acc #(
 
     typedef enum logic [2:0] {
         IDLE    = 3'd0,
-        LOAD_R0 = 3'd1,
-        LOAD_R1 = 3'd2,
-        LOAD_R2 = 3'd3,
-        WAIT_R2 = 3'd4,
+        LOAD_R0_R1_R2 = 3'd1,
         CALC_POP = 3'd5,
         END_ROW = 3'd6,
         FINAL = 3'd7
     } state_t;
 
     state_t state, next_state;
+
+    // optimisation:
+    // port for the buffer middle line
+    logic                  lbu_wr_en;
+    logic [6:0]            lbu_wr_addr;
+    logic [31:0]           lbu_wr_data;
+    logic                  lbu_rd_en;
+    logic [6:0]            lbu_rd_addr;
+    logic [31:0]           lbu_rd_data;
+
+    // port for the buffer middle line
+    logic                  lbm_wr_en;
+    logic [6:0]            lbm_wr_addr;
+    logic [31:0]           lbm_wr_data;
+    logic                  lbm_rd_en;
+    logic [6:0]            lbm_rd_addr;
+    logic [31:0]           lbm_rd_data;
+
+    // Optimisation: save the two last row in two buffers
+    bram_sdp #(.DATA_WIDTH(32), .ADDR_WIDTH(7), .DEPTH(IMG_WIDTH)) LineBufferUp ( // 2^6< 88 <2^7 -> need 7 bits for adressing
+      .clk     (clk),
+      .wr_en   (lbu_wr_en),
+      .wr_addr (lbu_wr_addr),
+      .wr_data (lbu_wr_data),
+      .rd_en   (lbu_rd_en),
+      .rd_addr (lbu_rd_addr),
+      .rd_data (lbu_rd_data)
+  );
+    bram_sdp #(.DATA_WIDTH(32), .ADDR_WIDTH(7), .DEPTH(IMG_WIDTH)) LineBufferMid ( // 2^6< 88 <2^7 -> need 7 bits for adressing
+      .clk     (clk),
+      .wr_en   (lbm_wr_en),
+      .wr_addr (lbm_wr_addr),
+      .wr_data (lbm_wr_data),
+      .rd_en   (lbm_rd_en),
+      .rd_addr (lbm_rd_addr),
+      .rd_data (lbm_rd_data)
+  );
 
     // COUNTERS:
     logic [8:0] r, next_r; //row counter: 1 to 286
@@ -80,6 +116,9 @@ module pixel_acc #(
     logic [7:0] next_prev_c [3], next_prev_d [3];
     logic [7:0] hold_b, hold_c, hold_a;
     logic [7:0] next_hold_b, next_hold_c, next_hold_a;
+
+    
+
 
     // SOBEL FUNCTION (COMBINATIONAL)
     function automatic [7:0] sobel_calc(
@@ -153,6 +192,21 @@ module pixel_acc #(
       obuf_wr_data = '0;
       finish = 1'b0;
 
+      // optimisation:
+      // buffer up
+      lbu_wr_en = 1'b0;
+      lbu_wr_addr = '0;
+      lbu_wr_data = '0;
+      lbu_rd_en = 1'b0;
+      lbu_rd_addr = '0;
+
+      //buffer middle
+      lbm_wr_en = 1'b0;
+      lbm_wr_addr = '0;
+      lbm_wr_data = '0;
+      lbm_rd_en = 1'b0;
+      lbm_rd_addr = '0;
+
       // Sobel outputs computed combinationally from active 3x6 window:
       // window d_prev: [prev_c, prev_d, curr_a]
       // window a_curr: [prev_d, curr_a, curr_b]
@@ -169,42 +223,49 @@ module pixel_acc #(
             next_w = 7'd0;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr = (r - 1) * IMG_WIDTH + w; // request R0.
-            next_state = LOAD_R0;
+            next_state = LOAD_R0_R1_R2;
           end
         end
-        
-        LOAD_R0: begin
-          next_curr[0][0] = ibuf_rd_data[7:0]; // load R0.
-          next_curr[0][1] = ibuf_rd_data[15:8];
-          next_curr[0][2] = ibuf_rd_data[23:16];
-          next_curr[0][3] = ibuf_rd_data[31:24];
 
-          ibuf_rd_en = 1'b1;
-          ibuf_rd_addr = r * IMG_WIDTH + w; // request R1.
-          next_state = LOAD_R1;
-        end
+        LOAD_R0_R1_R2: begin
+          next_curr[0][0] = lbu_rd_data[7:0]; // load R0.
+          next_curr[0][1] = lbu_rd_data[15:8];
+          next_curr[0][2] = lbu_rd_data[23:16];
+          next_curr[0][3] = lbu_rd_data[31:24];
 
-        LOAD_R1: begin
-          next_curr[1][0] = ibuf_rd_data[7:0]; // load R1.
-          next_curr[1][1] = ibuf_rd_data[15:8];
-          next_curr[1][2] = ibuf_rd_data[23:16];
-          next_curr[1][3] = ibuf_rd_data[31:24];
+          lbm_rd_en = 1'b1;
+          lbm_rd_addr = w; // request R1.
+
+          next_curr[1][0] = lbm_rd_data[7:0]; // load R1.
+          next_curr[1][1] = lbm_rd_data[15:8];
+          next_curr[1][2] = lbm_rd_data[23:16];
+          next_curr[1][3] = lbm_rd_data[31:24];
 
           ibuf_rd_en = 1'b1;
           ibuf_rd_addr = (r + 1) * IMG_WIDTH + w; // request R2.
-          next_state = LOAD_R2;
-        end
 
-        LOAD_R2: begin
           next_curr[2][0] = ibuf_rd_data[7:0]; // load R2.
           next_curr[2][1] = ibuf_rd_data[15:8];
           next_curr[2][2] = ibuf_rd_data[23:16];
           next_curr[2][3] = ibuf_rd_data[31:24];
 
           next_state = CALC_POP;
+
         end
 
         CALC_POP: begin
+          // optimisation: 
+          // store the middle row (a, b, c and d ) in the buffer for the up line, these data will be use for the next row (same column)
+          lbu_wr_en = 1'b1;
+          lbu_wr_addr = w;
+          lbu_wr_data = next_curr[1];
+
+          // store the lower row (a, b, c and d ) in the buffer for the middle line,
+          lbm_wr_en = 1'b1;
+          lbm_wr_addr = w;
+          lbm_wr_data = next_curr[2];
+
+
           // calculate 4 sobel outputs.
           // d_prev: col 1, 2, 3 -> prev_c[i], prev_d[i], curr[i][0]
           // a_curr: col 2, 3, 4 -> prev_d[i], curr[i][0], curr[i][1]
@@ -258,9 +319,9 @@ module pixel_acc #(
             next_state = END_ROW;
           end else begin // not the last word of the row? then load next word in same row until row ends.
             next_w = w + 1'b1;
-            ibuf_rd_en = 1'b1;
-            ibuf_rd_addr = (r - 1) * IMG_WIDTH + (w + 1);
-            next_state = LOAD_R0;
+            lbu_rd_en = 1'b1;
+            lbu_rd_addr = w + 1;
+            next_state = LOAD_R0_R1_R2;
           end
         end
 
@@ -284,8 +345,8 @@ module pixel_acc #(
           end else begin // if not last row yet just continue to the next row.
             next_r = r + 1'b1;
             ibuf_rd_en = 1'b1;
-            ibuf_rd_addr = r * IMG_WIDTH; // start of next row minus 1.
-            next_state = LOAD_R0;
+            ibuf_rd_addr = 0; // start of next row minus 1.
+            next_state = LOAD_R0_R1_R2;
           end
         end
 
