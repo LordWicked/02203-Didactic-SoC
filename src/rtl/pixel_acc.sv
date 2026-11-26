@@ -59,7 +59,6 @@ module pixel_acc #(
 
     typedef enum logic [2:0] {
         IDLE    = 3'd0,
-        LOAD_R0_R1_R2 = 3'd1,
         CALC_POP = 3'd5,
         END_ROW = 3'd6,
         FINAL = 3'd7
@@ -148,9 +147,9 @@ module pixel_acc #(
         for (int i = 0; i < 3; i++) begin
           prev_c[i] <= 8'd0;
           prev_d[i] <= 8'd0;
-          for (int j = 0; j < 4; j++) begin
-            curr[i][j] <= 8'd0;
-          end
+          //for (int j = 0; j < 4; j++) begin
+            //curr[i][j] <= 8'd0;
+          //end
         end
       end else begin
         state <= next_state;
@@ -162,9 +161,9 @@ module pixel_acc #(
         for (int i = 0; i < 3; i++) begin
           prev_c[i] <= next_prev_c[i];
           prev_d[i] <= next_prev_d[i];
-          for (int j = 0; j < 4; j++) begin
-            curr[i][j] <= next_curr[i][j];
-          end
+          //for (int j = 0; j < 4; j++) begin
+            //curr[i][j] <= next_curr[i][j];
+          //end
         end
       end
     end
@@ -207,6 +206,23 @@ module pixel_acc #(
       lbm_rd_en = 1'b0;
       lbm_rd_addr = '0;
 
+      // optimisation: put as combinational (remove intermediate register) as in the pixel inversion code
+      curr[0][0] = lbu_rd_data[7:0]; // load R0.
+      curr[0][1] = lbu_rd_data[15:8];
+      curr[0][2] = lbu_rd_data[23:16];
+      curr[0][3] = lbu_rd_data[31:24];
+      
+
+      curr[1][0] = lbm_rd_data[7:0]; // load R1.
+      curr[1][1] = lbm_rd_data[15:8];
+      curr[1][2] = lbm_rd_data[23:16];
+      curr[1][3] = lbm_rd_data[31:24];
+    
+      curr[2][0] = ibuf_rd_data[7:0]; // load R2.
+      curr[2][1] = ibuf_rd_data[15:8];
+      curr[2][2] = ibuf_rd_data[23:16];
+      curr[2][3] = ibuf_rd_data[31:24];
+
       // Sobel outputs computed combinationally from active 3x6 window:
       // window d_prev: [prev_c, prev_d, curr_a]
       // window a_curr: [prev_d, curr_a, curr_b]
@@ -223,37 +239,10 @@ module pixel_acc #(
             next_w = 7'd0;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr = (r - 1) * IMG_WIDTH + w; // request R0.
-            next_state = LOAD_R0_R1_R2;
+            next_state = CALC_POP;
           end
         end
 
-        LOAD_R0_R1_R2: begin
-          next_curr[0][0] = lbu_rd_data[7:0]; // load R0.
-          next_curr[0][1] = lbu_rd_data[15:8];
-          next_curr[0][2] = lbu_rd_data[23:16];
-          next_curr[0][3] = lbu_rd_data[31:24];
-
-          
-
-          next_curr[1][0] = lbm_rd_data[7:0]; // load R1.
-          next_curr[1][1] = lbm_rd_data[15:8];
-          next_curr[1][2] = lbm_rd_data[23:16];
-          next_curr[1][3] = lbm_rd_data[31:24];
-
-        
-          next_curr[2][0] = ibuf_rd_data[7:0]; // load R2.
-          next_curr[2][1] = ibuf_rd_data[15:8];
-          next_curr[2][2] = ibuf_rd_data[23:16];
-          next_curr[2][3] = ibuf_rd_data[31:24];
-
-          
-          
-
-          next_state = CALC_POP;
-
-          
-
-        end
 
         CALC_POP: begin
           
@@ -329,7 +318,7 @@ module pixel_acc #(
             lbm_rd_addr = w + 1;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr = (r + 1) * IMG_WIDTH + (w+1);
-            next_state = LOAD_R0_R1_R2;
+            next_state = CALC_POP;
           end
         end
 
@@ -358,7 +347,7 @@ module pixel_acc #(
             lbm_rd_addr = 0;
             ibuf_rd_en = 1'b1;
             ibuf_rd_addr =  (r + 2) * IMG_WIDTH; // start of next row minus 1.
-            next_state = LOAD_R0_R1_R2;
+            next_state = CALC_POP;
           end
         end
 
